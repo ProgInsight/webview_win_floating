@@ -155,27 +155,22 @@ class _WinWebViewWidgetState extends State<WinWebViewWidget> {
   @override
   void initState() {
     super.initState();
-    widget.controller._resume();
+    // Do NOT call showTab() here — initState fires even when the widget
+    // is mounted inside Offstage(offstage:true), immediately followed by
+    // deactivate() → hideTab(), causing a redundant cycle.
+    // activate() → showTab() fires when Offstage becomes false.
   }
 
   @override
   void activate() {
     super.activate();
-    if (widget.controller.params.suspendDuringDeactive) {
-      widget.controller._resume();
-    } else {
-      widget.controller.setVisibility(true);
-    }
+    widget.controller.showTab();
   }
 
   @override
   void deactivate() {
     super.deactivate();
-    if (widget.controller.params.suspendDuringDeactive) {
-      widget.controller._suspend();
-    } else {
-      widget.controller.setVisibility(false);
-    }
+    widget.controller.hideTab();
   }
 
   @override
@@ -209,6 +204,14 @@ int _gLastWebViewId = 0;
 
 class WinWebViewController {
   final _webviewId = ++_gLastWebViewId;
+
+  /// The numeric ID that identifies this WebView2 instance.
+  /// Used by [CCBrowserBridge] for script injection and virtual-host mapping.
+  int get webviewId => _webviewId;
+
+  /// Completes when the native WebView2 instance is fully created.
+  /// Await this before calling any CCBrowserBridge method.
+  Future<void> waitUntilReady() async => _initFuture;
   late Future<bool> _initFuture;
   WinNavigationDelegate _navigationDelegate = WinNavigationDelegate();
   final _javaScriptMessageCallbacks = <String, JavaScriptMessageCallback>{};
@@ -235,6 +238,11 @@ class WinWebViewController {
     PlatformWebViewControllerCreationParams params =
         const WindowsWebViewControllerCreationParams(),
     void Function(WinWebViewPermissionRequest request)? onPermissionRequest,
+    // Optional URL to load immediately when WebView2 finishes initialising.
+    // Passing it here lets the native onCreated handler call Navigate()
+    // directly, avoiding the extra async method-channel round-trip that
+    // loadRequest() would otherwise need.
+    String? initialUrl,
   }) {
     _onPermissionRequest = onPermissionRequest;
     _finalizer.attach(this, _webviewId, detach: this);
@@ -247,11 +255,35 @@ class WinWebViewController {
       this.params = WindowsWebViewControllerCreationParams();
     }
 
+    // Build CCBrowser config JSON and pass it in the create call so the
+    // C++ plugin can apply virtual-host mapping and content-script injection
+    // synchronously inside onCreated — before any Dart method-channel call
+    // can race with the native webview lifecycle.
+    String? ccbConfig;
+    final p = this.params;
+    if (p is WindowsWebViewControllerCreationParams) {
+      final hasMapping = (p.virtualHostname?.isNotEmpty ?? false) &&
+          (p.virtualFolder?.isNotEmpty ?? false);
+      final hasScripts = p.contentScripts.isNotEmpty;
+      if (hasMapping || hasScripts) {
+        final Map<String, dynamic> cfg = {};
+        if (hasMapping) {
+          cfg['virtualHostname'] = p.virtualHostname;
+          cfg['virtualFolder']   = p.virtualFolder;
+        }
+        if (hasScripts) {
+          cfg['contentScripts'] = p.contentScripts;
+        }
+        ccbConfig = jsonEncode(cfg);
+      }
+    }
+
     _initFuture = WebviewWinFloatingPlatform.instance.create(
       _webviewId,
-      initialUrl: null,
+      initialUrl: initialUrl,
       userDataFolder: this.params.userDataFolder,
       profileName: this.params.profileName,
+      ccbConfig: ccbConfig,
     );
   }
 
@@ -626,6 +658,30 @@ class WinWebViewController {
     await WebviewWinFloatingPlatform.instance.resume(_webviewId);
   }
 
+  /// Hides this WebView for tab switching without suspending the renderer.
+  /// The page stays fully alive: JS runs, timers fire, audio/video keep playing.
+  /// Call [showTab] to make it visible again.
+  /// Safe to call before creation completes or after dispose — errors are swallowed.
+  Future<void> hideTab() async {
+    try {
+      await _initFuture;
+      await WebviewWinFloatingPlatform.instance.hideTab(_webviewId);
+    } catch (_) {
+      // Called before native create completed or after dispose — ignore.
+    }
+  }
+
+  /// Restores this WebView after a [hideTab] call.
+  /// Safe to call before creation completes or after dispose — errors are swallowed.
+  Future<void> showTab() async {
+    try {
+      await _initFuture;
+      await WebviewWinFloatingPlatform.instance.showTab(_webviewId);
+    } catch (_) {
+      // Called before native create completed or after dispose — ignore.
+    }
+  }
+
   Future<void> dispose() async {
     await _initFuture;
     _finalizer.detach(this);
@@ -666,5 +722,47 @@ class WinWebViewController {
       _webviewId,
       isEnable,
     );
+  }
+}
+
+// ── Platform registration ────────────────────────────────────────────────────
+//
+// This class is the dartPluginClass declared in pubspec.yaml.
+// Flutter's auto-generated dart_plugin_registrant.dart calls
+// WindowsWebViewPlatform.registerWith() during startup.
+//
+// The CCBrowser app uses WinWebViewController directly rather than going
+// through WebViewPlatform.createPlatform*(), so the factory methods below
+// are no-op stubs — they satisfy the interface but are never invoked.
+
+class WindowsWebViewPlatform extends WebViewPlatform {
+  /// Called by the Flutter plugin registrant.  Sets this class as the active
+  /// WebViewPlatform so that any code that uses WebViewPlatform.instance works.
+  static void registerWith() {
+    WebViewPlatform.instance = WindowsWebViewPlatform();
+  }
+
+  @override
+  PlatformWebViewController createPlatformWebViewController(
+      PlatformWebViewControllerCreationParams params) {
+    return WindowsPlatformWebViewController(params);
+  }
+
+  @override
+  PlatformWebViewWidget createPlatformWebViewWidget(
+      PlatformWebViewWidgetCreationParams params) {
+    // CCBrowser uses WinWebViewWidget directly; this stub is never called.
+    throw UnimplementedError(
+        'WindowsWebViewPlatform.createPlatformWebViewWidget is not used by CCBrowser. '
+        'Use WinWebViewWidget instead.');
+  }
+
+  @override
+  PlatformNavigationDelegate createPlatformNavigationDelegate(
+      PlatformNavigationDelegateCreationParams params) {
+    // CCBrowser uses WinNavigationDelegate directly.
+    throw UnimplementedError(
+        'WindowsWebViewPlatform.createPlatformNavigationDelegate is not used by CCBrowser. '
+        'Use WinNavigationDelegate instead.');
   }
 }

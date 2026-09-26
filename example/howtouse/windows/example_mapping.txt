@@ -1,0 +1,45 @@
+// =============================================================================
+// CCBrowser Bridge — Virtual Host Mapping Example
+// =============================================================================
+// Shows how to use CCBrowserBridge to map a local folder to a virtual
+// https:// hostname inside WebView2.
+//
+// Typical use: serve local web utilities (notepad, calculator, calendar)
+// at predictable https:// URLs so they feel like real web apps.
+//
+// Setup:
+//   %LOCALAPPDATA%\ProgInsight\shared\web\
+//     notepad\index.html
+//     calculator\index.html
+//     calendar\index.html
+//
+// Result:
+//   https://app.data/notepad/index.html     → serves notepad
+//   https://app.data/calculator/index.html  → serves calculator
+//   https://app.data/calendar/index.html    → serves calendar
+// =============================================================================
+
+import 'dart:io';
+import 'package:webview_win_floating/ccbrowser_bridge.dart';
+
+Future<void> exampleSetupVirtualHost(int webviewId) async {
+  // Resolve %LOCALAPPDATA% at runtime — never hardcode paths
+  final localAppData = Platform.environment['LOCALAPPDATA'] ?? '';
+  final webRoot = '$localAppData\\ProgInsight\\shared\\web';
+
+  final bridge = CCBrowserBridge(webviewId: webviewId);
+
+  // Map https://app.data → local web folder
+  final ok = await bridge.setVirtualHost('app.data', webRoot);
+  if (ok) {
+    print('[CCBridge] Virtual host ready: https://app.data → $webRoot');
+  }
+
+  // Now navigate to a local utility
+  // controller.loadRequest(Uri.parse('https://app.data/notepad/index.html'));
+}
+
+Future<void> exampleRemoveVirtualHost(int webviewId) async {
+  final bridge = CCBrowserBridge(webviewId: webviewId);
+  await bridge.removeVirtualHost('app.data');
+}

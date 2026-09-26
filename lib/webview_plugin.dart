@@ -1,133 +1,66 @@
-import 'dart:developer';
+// lib/webview_plugin.dart  (CCBrowser fork)
+// ignore_for_file: avoid_unused_constructor_parameters
 
-import 'package:flutter/widgets.dart';
+import 'package:flutter/foundation.dart';
 import 'package:webview_flutter_platform_interface/webview_flutter_platform_interface.dart';
-import 'package:webview_win_floating/webview.dart';
+import 'webview_win_floating_method_channel.dart';
+import 'webview_win_floating_platform_interface.dart';
 
-class WindowsWebViewPlatform extends WebViewPlatform {
-  /// Registers this class as the default instance of [WebViewPlatform].
-  static void registerWith() {
-    WebViewPlatform.instance = WindowsWebViewPlatform();
-  }
+export 'package:webview_flutter_platform_interface/webview_flutter_platform_interface.dart'
+    show
+        JavaScriptMessage,
+        NavigationDecision,
+        NavigationRequest,
+        PlatformWebViewControllerCreationParams,
+        UrlChange;
 
-  @override
-  WindowsPlatformNavigationDelegate createPlatformNavigationDelegate(
-    PlatformNavigationDelegateCreationParams params,
-  ) {
-    return WindowsPlatformNavigationDelegate(params);
-  }
+// --------------------------------------------------------------------------
+// callback types
+// --------------------------------------------------------------------------
 
-  @override
-  WindowsPlatformWebViewController createPlatformWebViewController(
-    PlatformWebViewControllerCreationParams params,
-  ) {
-    return WindowsPlatformWebViewController(params);
-  }
-
-  @override
-  WindowsPlatformWebViewWidget createPlatformWebViewWidget(
-    PlatformWebViewWidgetCreationParams params,
-  ) {
-    return WindowsPlatformWebViewWidget(params);
-  }
-
-  @override
-  WindowsPlatformWebViewCookieManager createPlatformCookieManager(
-    PlatformWebViewCookieManagerCreationParams params,
-  ) {
-    return WindowsPlatformWebViewCookieManager(params);
-  }
-}
+typedef JavaScriptMessageCallback = void Function(JavaScriptMessage message);
+typedef WinWebViewPermissionRequest = ({
+  String uri,
+  int kind,
+  int deferralId
+});
 
 // --------------------------------------------------------------------------
 // navigation delegate
 // --------------------------------------------------------------------------
 
-class WindowsPlatformNavigationDelegate extends PlatformNavigationDelegate {
-  NavigationRequestCallback? onNavigationRequest;
-  PageEventCallback? onPageStarted;
-  PageEventCallback? onPageFinished;
-
-  HttpResponseErrorCallback? onHttpError;
-  SslAuthErrorCallback? onSslAuthError;
-  WebResourceErrorCallback? onWebResourceError;
-  UrlChangedCallback? onUrlChange;
-
-  WindowsPlatformNavigationDelegate(
-    PlatformNavigationDelegateCreationParams params,
-  ) : super.implementation(params);
-
-  @override
-  Future<void> setOnNavigationRequest(
-    NavigationRequestCallback onNavigationRequest,
-  ) async {
-    this.onNavigationRequest = onNavigationRequest;
-  }
-
-  @override
-  Future<void> setOnPageStarted(PageEventCallback onPageStarted) async {
-    this.onPageStarted = onPageStarted;
-  }
-
-  @override
-  Future<void> setOnPageFinished(PageEventCallback onPageFinished) async {
-    this.onPageFinished = onPageFinished;
-  }
-
-  @override
-  Future<void> setOnProgress(ProgressCallback onProgress) async {
-    log("[webview_win_floating] ProgressCallback not support");
-  }
-
-  @override
-  Future<void> setOnHttpError(HttpResponseErrorCallback onHttpError) async {
-    this.onHttpError = onHttpError;
-  }
-
-  @override
-  Future<void> setOnSSlAuthError(SslAuthErrorCallback onSslAuthError) async {
-    this.onSslAuthError = onSslAuthError;
-  }
-
-  @override
-  Future<void> setOnWebResourceError(
-    WebResourceErrorCallback onWebResourceError,
-  ) async {
-    this.onWebResourceError = onWebResourceError;
-  }
-
-  @override
-  Future<void> setOnUrlChange(UrlChangeCallback onUrlChange) async {
-    this.onUrlChange = onUrlChange;
-  }
-}
-
-// --------------------------------------------------------------------------
-// webview
-// --------------------------------------------------------------------------
-
-@immutable
-class WindowsPlatformWebViewWidgetCreationParams
-    extends PlatformWebViewWidgetCreationParams {
-  const WindowsPlatformWebViewWidgetCreationParams({
-    super.key,
-    required super.controller,
+class WinNavigationDelegate {
+  WinNavigationDelegate({
+    this.onPageStarted,
+    this.onPageFinished,
+    this.onHttpError,
+    this.onSslAuthError,
+    this.onWebResourceError,
+    this.onNavigationRequest,
+    this.onUrlChange,
+    this.onPageTitleChanged,
+    this.onHistoryChanged,
+    this.onFullScreenChanged,
+    this.onFaviconChanged,
   });
-}
 
-class WindowsPlatformWebViewWidget extends PlatformWebViewWidget {
-  WindowsPlatformWebViewWidget(PlatformWebViewWidgetCreationParams params)
-      : super.implementation(params);
-
-  @override
-  Widget build(BuildContext context) {
-    var controller = params.controller as WindowsPlatformWebViewController;
-    return WinWebViewWidget(controller: controller.controller);
-  }
+  final void Function(String url)? onPageStarted;
+  final void Function(String url)? onPageFinished;
+  final void Function(String url, int errCode)? onHttpError;
+  final void Function(String url)? onSslAuthError;
+  final void Function(String url, int errCode, String errType)?
+      onWebResourceError;
+  final NavigationDecision Function(NavigationRequest request)?
+      onNavigationRequest;
+  final void Function(UrlChange change)? onUrlChange;
+  final void Function(String title)? onPageTitleChanged;
+  final void Function()? onHistoryChanged;
+  final void Function(bool isFullScreen)? onFullScreenChanged;
+  final void Function(String? faviconUrl)? onFaviconChanged;
 }
 
 // --------------------------------------------------------------------------
-// controller
+// controller creation params
 // --------------------------------------------------------------------------
 
 typedef WindowsPlatformWebViewControllerCreationParams // legacy name
@@ -150,11 +83,39 @@ class WindowsWebViewControllerCreationParams
 
   final bool suspendDuringDeactive;
 
+  // ── CCBrowser: lazy-loaded config ─────────────────────────────────────────
+  //
+  // These are passed to the native `create` call as a JSON blob.
+  // The C++ plugin applies them synchronously inside `onCreated`, after
+  // the WebView2 object exists — so no async Dart→native round-trips are
+  // needed after creation.
+  //
+  // virtualHostname + virtualFolder:  maps https://<virtualHostname>/ to the
+  //   local folder at <virtualFolder> via SetVirtualHostNameToFolderMapping.
+  //
+  // contentScripts: JS strings injected before every page's own scripts via
+  //   AddScriptToExecuteOnDocumentCreated.  The C++ side returns the script
+  //   IDs via a new "onScriptsAdded" method-channel event if you ever need
+  //   to remove them later; for now they persist for the webview lifetime.
+
+  /// The https:// hostname to map to [virtualFolder] (e.g. "app.data").
+  final String? virtualHostname;
+
+  /// Absolute Windows path served under [virtualHostname] (e.g.
+  /// r"C:\Users\X\AppData\Local\ProgInsight\shared\web").
+  final String? virtualFolder;
+
+  /// JS strings to inject before every page's own scripts.
+  final List<String> contentScripts;
+
   /// Creates a new [WindowsPlatformWebViewControllerCreationParams] instance.
   const WindowsWebViewControllerCreationParams({
     this.userDataFolder,
     this.profileName,
     this.suspendDuringDeactive = true,
+    this.virtualHostname,
+    this.virtualFolder,
+    this.contentScripts = const [],
   }) : super();
 
   /// Creates a [WindowsPlatformWebViewControllerCreationParams] instance based on [PlatformWebViewControllerCreationParams].
@@ -168,215 +129,10 @@ class WindowsWebViewControllerCreationParams
 }
 
 class WindowsPlatformWebViewController extends PlatformWebViewController {
-  late final WinWebViewController controller;
-
   WindowsPlatformWebViewController(
-    PlatformWebViewControllerCreationParams params,
-  ) : super.implementation(params) {
-    controller = WinWebViewController(params: params);
-  }
+      PlatformWebViewControllerCreationParams params)
+      : super.implementation(params);
 
   @override
-  Future<void> setPlatformNavigationDelegate(
-    PlatformNavigationDelegate handler,
-  ) async {
-    var delegate = handler as WindowsPlatformNavigationDelegate;
-    controller.setNavigationDelegate(
-      WinNavigationDelegate(
-        onNavigationRequest: delegate.onNavigationRequest,
-        onPageStarted: delegate.onPageStarted,
-        onPageFinished: delegate.onPageFinished,
-        onHttpError: delegate.onHttpError,
-        onSslAuthError: delegate.onSslAuthError,
-        onWebResourceError: delegate.onWebResourceError,
-        onUrlChange: delegate.onUrlChange,
-      ),
-    );
-  }
-
-  @override
-  Future<void> setJavaScriptMode(JavaScriptMode javaScriptMode) {
-    return controller.setJavaScriptMode(javaScriptMode);
-  }
-
-  @override
-  Future<void> addJavaScriptChannel(
-    JavaScriptChannelParams javaScriptChannelParams,
-  ) async {
-    controller.addJavaScriptChannel(
-      javaScriptChannelParams.name,
-      onMessageReceived: javaScriptChannelParams.onMessageReceived,
-    );
-  }
-
-  @override
-  Future<void> removeJavaScriptChannel(String javaScriptChannelName) async {
-    controller.removeJavaScriptChannel(javaScriptChannelName);
-  }
-
-  @override
-  Future<bool> canGoBack() {
-    return controller.canGoBack();
-  }
-
-  @override
-  Future<bool> canGoForward() {
-    return controller.canGoForward();
-  }
-
-  @override
-  Future<void> clearCache() {
-    return controller.clearCache();
-  }
-
-  @override
-  Future<void> clearLocalStorage() {
-    return controller.clearLocalStorage();
-  }
-
-  @override
-  Future<String?> currentUrl() {
-    return controller.currentUrl();
-  }
-
-  @override
-  Future<Offset> getScrollPosition() async {
-    // WebView2 not support
-    log("[webview_win_floating] getScrollPosition() not support for WebView2");
-    return Offset.zero;
-  }
-
-  @override
-  Future<String?> getTitle() {
-    return controller.getTitle();
-  }
-
-  @override
-  Future<void> goBack() {
-    return controller.goBack();
-  }
-
-  @override
-  Future<void> goForward() {
-    return controller.goForward();
-  }
-
-  @override
-  Future<void> loadFile(String absoluteFilePath) {
-    return controller.loadRequest_(absoluteFilePath);
-  }
-
-  @override
-  Future<void> loadFlutterAsset(String key) {
-    throw UnimplementedError('Windows webview not support load from assets');
-  }
-
-  @override
-  Future<void> loadHtmlString(String html, {String? baseUrl}) {
-    return controller.loadHtmlString(html, baseUrl: baseUrl);
-  }
-
-  @override
-  Future<void> loadRequest(LoadRequestParams params) {
-    return controller.loadRequest(
-      params.uri,
-      method: params.method,
-      headers: params.headers,
-      body: params.body,
-    );
-  }
-
-  @override
-  Future<void> reload() {
-    return controller.reload();
-  }
-
-  @override
-  Future<void> runJavaScript(String javaScript) {
-    return controller.runJavaScript(javaScript);
-  }
-
-  @override
-  Future<Object> runJavaScriptReturningResult(String javaScript) {
-    return controller.runJavaScriptReturningResult(javaScript);
-  }
-
-  @override
-  Future<void> setUserAgent(String? userAgent) {
-    return controller.setUserAgent(userAgent);
-  }
-
-  @override
-  Future<void> scrollBy(int x, int y) async {
-    log("[webview_win_floaing] scrollBy() is not support in windows webview");
-  }
-
-  @override
-  Future<void> scrollTo(int x, int y) async {
-    log("[webview_win_floaing] scrollTo() is not support in windows webview");
-  }
-
-  @override
-  Future<void> setBackgroundColor(Color color) {
-    return controller.setBackgroundColor(color);
-  }
-
-  @override
-  Future<void> setOnPlatformPermissionRequest(
-    void Function(PlatformWebViewPermissionRequest request) onPermissionRequest,
-  ) async {
-    controller.setOnPlatformPermissionRequest_(onPermissionRequest);
-  }
-
-  @override
-  Future<void> enableZoom(bool isEnable) {
-    return controller.enableZoom(isEnable);
-  }
-
-  // ------------------------------------------------------------------------
-  // Windows-only methods
-  // ------------------------------------------------------------------------
-
-  Future<void> openDevTools() {
-    return controller.openDevTools();
-  }
-
-  Future<void> setStatusBar(bool isEnable) {
-    return controller.setStatusBar(isEnable);
-  }
-}
-
-// --------------------------------------------------------------------------
-// cookie manager
-// --------------------------------------------------------------------------
-
-@immutable
-class WindowsPlatformWebViewCookieManagerCreationParams
-    extends PlatformWebViewCookieManagerCreationParams {
-  const WindowsPlatformWebViewCookieManagerCreationParams._(
-    PlatformWebViewCookieManagerCreationParams params,
-  ) : super();
-
-  factory WindowsPlatformWebViewCookieManagerCreationParams.fromPlatformWebViewCookieManagerCreationParams(
-    PlatformWebViewCookieManagerCreationParams params,
-  ) {
-    return WindowsPlatformWebViewCookieManagerCreationParams._(params);
-  }
-}
-
-class WindowsPlatformWebViewCookieManager extends PlatformWebViewCookieManager {
-  WindowsPlatformWebViewCookieManager(super.params) : super.implementation();
-
-  @override
-  Future<bool> clearCookies() async {
-    log(
-      "[webview_win_floating] clearCookies() not support. try controller.clearCache() instead",
-    );
-    return false;
-  }
-
-  @override
-  Future<void> setCookie(WebViewCookie cookie) async {
-    log("[webview_win_floating] setCookie() not support");
-  }
+  Future<void> setJavaScriptMode(JavaScriptMode javaScriptMode) async {}
 }

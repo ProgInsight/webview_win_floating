@@ -6,7 +6,6 @@ import 'webview.dart';
 import 'webview_win_floating_method_channel.dart';
 
 abstract class WebviewWinFloatingPlatform extends PlatformInterface {
-  /// Constructs a WebviewWinFloatingPlatform.
   WebviewWinFloatingPlatform() : super(token: _token);
 
   static final Object _token = Object();
@@ -14,14 +13,8 @@ abstract class WebviewWinFloatingPlatform extends PlatformInterface {
   static WebviewWinFloatingPlatform _instance =
       MethodChannelWebviewWinFloating();
 
-  /// The default instance of [WebviewWinFloatingPlatform] to use.
-  ///
-  /// Defaults to [MethodChannelWebviewWinFloating].
   static WebviewWinFloatingPlatform get instance => _instance;
 
-  /// Platform-specific implementations should set this with their own
-  /// platform-specific class that extends [WebviewWinFloatingPlatform] when
-  /// they register themselves.
   static set instance(WebviewWinFloatingPlatform instance) {
     PlatformInterface.verifyToken(instance, _token);
     _instance = instance;
@@ -40,31 +33,23 @@ abstract class WebviewWinFloatingPlatform extends PlatformInterface {
     String? initialUrl,
     String? userDataFolder,
     String? profileName,
+    String? ccbConfig,
   }) {
     throw UnimplementedError();
   }
 
   Future<void> setHasNavigationDecision(
-    int webviewId,
-    bool hasNavigationDecision,
-  ) {
+      int webviewId, bool hasNavigationDecision) {
     throw UnimplementedError();
   }
 
   Future<void> allowNavigationRequest(
-    int webviewId,
-    int requestId,
-    bool isAllowed,
-  ) {
+      int webviewId, int requestId, bool isAllowed) {
     throw UnimplementedError();
   }
 
   Future<void> updateBounds(
-    int webviewId,
-    Offset offset,
-    Size size,
-    double devicePixelRatio,
-  ) {
+      int webviewId, Offset offset, Size size, double devicePixelRatio) {
     throw UnimplementedError();
   }
 
@@ -81,9 +66,7 @@ abstract class WebviewWinFloatingPlatform extends PlatformInterface {
   }
 
   Future<Object> runJavaScriptReturningResult(
-    int webviewId,
-    String javaScriptString,
-  ) {
+      int webviewId, String javaScriptString) {
     throw UnimplementedError();
   }
 
@@ -171,15 +154,42 @@ abstract class WebviewWinFloatingPlatform extends PlatformInterface {
     throw UnimplementedError();
   }
 
-  // ------------------------------------------------------------------------
-  // Windows-only methods
-  // ------------------------------------------------------------------------
-
   Future<void> openDevTools(int webviewId) {
     throw UnimplementedError();
   }
 
   Future<void> enableStatusBar(int webviewId, bool isEnable) {
+    throw UnimplementedError();
+  }
+
+  // ── CCBrowser additions ───────────────────────────────────────────────────
+
+  Future<bool> ccbSetVirtualHost(
+      int webviewId, String hostname, String folderPath) {
+    throw UnimplementedError();
+  }
+
+  Future<bool> ccbRemoveVirtualHost(int webviewId, String hostname) {
+    throw UnimplementedError();
+  }
+
+  Future<String?> ccbAddScript(int webviewId, String script) {
+    throw UnimplementedError();
+  }
+
+  Future<bool> ccbRemoveScript(int webviewId, String scriptId) {
+    throw UnimplementedError();
+  }
+
+  // ── Tab hide/show ──────────────────────────────────────────────────────────
+  // These hide/show the WebView for tab switching WITHOUT suspending the
+  // renderer. JS, timers, audio, and video all keep running in the background.
+
+  Future<void> hideTab(int webviewId) {
+    throw UnimplementedError();
+  }
+
+  Future<void> showTab(int webviewId) {
     throw UnimplementedError();
   }
 }

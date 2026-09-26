@@ -15,9 +15,20 @@
 
 // Jacky {
 #include "my_webview.h"
+#include "additions/bridge.h"
 
-// toWideString(): convert utf8 to utf16, without calling MultiByteToWideChar()
-#define toWideString(str) std::wstring(str.begin(), str.end()).c_str()
+// toWideString(): convert utf8 to utf16 via MultiByteToWideChar (safe, no C4244)
+#define toWideString(str) utf8ToUtf16(str).c_str()
+
+// wideToUtf8(): convert utf16 wstring to utf8 string via WideCharToMultiByte (safe, no C4244)
+static std::string wideToUtf8(const std::wstring& wide) {
+  if (wide.empty()) return std::string();
+  int size = WideCharToMultiByte(CP_UTF8, 0, wide.c_str(), -1, nullptr, 0, nullptr, nullptr);
+  if (size <= 0) return std::string();
+  std::string out(size - 1, '\0');
+  WideCharToMultiByte(CP_UTF8, 0, wide.c_str(), -1, &out[0], size, nullptr, nullptr);
+  return out;
+}
 
 // utf8ToUtf16(): convert utf8 to utf16, with MultiByteToWideChar()
 std::wstring utf8ToUtf16(const std::string& utf8Str) {
@@ -69,9 +80,55 @@ WebviewWinFloatingPlugin::~WebviewWinFloatingPlugin() {
   destroyAllWebViews();
 }
 
+// ---------------------------------------------------------------------------
+// Simple helpers to extract string values from a minimal JSON object.
+// We only need to parse flat {"key":"value"} and {"key":["a","b"]} shapes
+// produced by dart:convert — so we avoid pulling in a JSON library.
+// ---------------------------------------------------------------------------
+static std::string ccb_jsonStringValue(const std::string& json, const std::string& key) {
+  // find "key":"value" — value ends at the next unescaped '"'
+  std::string needle = std::string(1,'"') + key + std::string(1,'"') + ':' + std::string(1,'"');
+  auto pos = json.find(needle);
+  if (pos == std::string::npos) return "";
+  pos += needle.size();
+  std::string result;
+  for (; pos < json.size(); ++pos) {
+    char c = json[pos];
+    if (c == '\\' && pos + 1 < json.size()) { result += json[++pos]; continue; }
+    if (c == '"') break;
+    result += c;
+  }
+  return result;
+}
+
+static std::vector<std::string> ccb_jsonStringArray(const std::string& json, const std::string& key) {
+  std::vector<std::string> out;
+  std::string needle = std::string(1,'"') + key + std::string(1,'"') + ":[";
+  auto pos = json.find(needle);
+  if (pos == std::string::npos) return out;
+  pos += needle.size();
+  while (pos < json.size()) {
+    // skip whitespace and commas
+    while (pos < json.size() && (json[pos] == ' ' || json[pos] == ',' || json[pos] == '\n')) ++pos;
+    if (pos >= json.size() || json[pos] == ']') break;
+    if (json[pos] != '"') { ++pos; continue; }
+    ++pos; // skip opening quote
+    std::string item;
+    for (; pos < json.size(); ++pos) {
+      char c = json[pos];
+      if (c == '\\' && pos + 1 < json.size()) { item += json[++pos]; continue; }
+      if (c == '"') { ++pos; break; }
+      item += c;
+    }
+    if (!item.empty()) out.push_back(item);
+  }
+  return out;
+}
+
 void WebviewWinFloatingPlugin::createWebview(const flutter::MethodCall<flutter::EncodableValue> &method_call,
     std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> &result,
-    int webviewId, std::string url, std::string userDataFolder, std::string profileName) {
+    int webviewId, std::string url, std::string userDataFolder, std::string profileName,
+    std::string ccbConfig) {
 
   std::shared_ptr<flutter::MethodResult<flutter::EncodableValue>> shared_result = std::move(result);
   MyWebViewCreateParams params;
@@ -80,10 +137,35 @@ void WebviewWinFloatingPlugin::createWebview(const flutter::MethodCall<flutter::
     if (webview != NULL) {
       m_webviewMap[webviewId] = webview;
       std::cout << "[webview] native create: id = " << webviewId << std::endl;
+
+      // ── CCBrowser lazy-config: apply mapping + scripts inside onCreated ──
+      // The WebView2 object exists here, so no async timing race is possible.
+      if (!ccbConfig.empty()) {
+        // Virtual-host mapping
+        auto vhost  = ccb_jsonStringValue(ccbConfig, "virtualHostname");
+        auto vfolder = ccb_jsonStringValue(ccbConfig, "virtualFolder");
+        if (!vhost.empty() && !vfolder.empty()) {
+          std::wstring whostname = utf8ToUtf16(vhost);
+          std::wstring wfolder   = utf8ToUtf16(vfolder);
+          // setVirtualHost is synchronous — it wraps SetVirtualHostNameToFolderMapping
+          webview->setVirtualHost(whostname.c_str(), wfolder.c_str());
+          std::cout << "[CCBrowser] mapped https://" << vhost << " -> " << vfolder << std::endl;
+        }
+        // Content-script injection
+        auto scripts = ccb_jsonStringArray(ccbConfig, "contentScripts");
+        std::cout << "[CCBrowser] injecting " << scripts.size() << " script(s) for id=" << webviewId << std::endl;
+        for (const auto& script : scripts) {
+          webview->addScript(utf8ToUtf16(script).c_str(), [webviewId](std::wstring scriptId) {
+            std::cout << "[CCBrowser] script added id=" << webviewId << " scriptId=" << wideToUtf8(scriptId) << std::endl;
+          });
+        }
+      }
+      // ─────────────────────────────────────────────────────────────────────
+
       if (!url.empty()) webview->loadUrl(toWideString(url));
       shared_result->Success(flutter::EncodableValue(true));
     } else {
-      std::cerr << "[webview] native create failed. result = " << hr << std::endl;
+      std::cout << "[webview] native create failed. result = " << static_cast<int>(hr) << std::endl;
       shared_result->Error("[webview] native create failed.");
     }
   };
@@ -213,9 +295,11 @@ void WebviewWinFloatingPlugin::HandleMethodCall(
   flutter::EncodableMap arguments = std::get<flutter::EncodableMap>(*method_call.arguments());
   auto webviewId = std::get<int>(arguments[flutter::EncodableValue("webviewId")]);
 
-  bool isCreateCall = method_call.method_name().compare("create") == 0;
+  bool isCreateCall  = method_call.method_name().compare("create") == 0;
+  bool isHideShowTab = method_call.method_name().compare("hideTab") == 0
+                    || method_call.method_name().compare("showTab") == 0;
   auto webview = m_webviewMap[webviewId];
-  if (webview == NULL && !isCreateCall) {
+  if (webview == NULL && !isCreateCall && !isHideShowTab) {
     result->Error("webview hasn't created");
     return;
   }
@@ -224,7 +308,8 @@ void WebviewWinFloatingPlugin::HandleMethodCall(
     auto url = std::get<std::string>(arguments[flutter::EncodableValue("url")]);
     auto userDataFolder = std::get<std::string>(arguments[flutter::EncodableValue("userDataFolder")]);
     auto profileName = std::get<std::string>(arguments[flutter::EncodableValue("profileName")]);
-    createWebview(method_call, result, webviewId, url, userDataFolder, profileName);
+    auto ccbConfig = std::get<std::string>(arguments[flutter::EncodableValue("ccbConfig")]);
+    createWebview(method_call, result, webviewId, url, userDataFolder, profileName, ccbConfig);
   } else if (method_call.method_name().compare("setHasNavigationDecision") == 0) {
     auto hasNavigationDecision = std::get<bool>(arguments[flutter::EncodableValue("hasNavigationDecision")]);
     webview->setHasNavigationDecision(hasNavigationDecision);
@@ -366,6 +451,43 @@ void WebviewWinFloatingPlugin::HandleMethodCall(
   } else if (method_call.method_name().compare("openDevTools") == 0) {
     webview->openDevTools();
     result->Success();
+
+  // CCBrowser additions
+
+  } else if (method_call.method_name().compare("ccb_setVirtualHost") == 0) {
+    auto hostname   = std::get<std::string>(arguments[flutter::EncodableValue("hostname")]);
+    auto folderPath = std::get<std::string>(arguments[flutter::EncodableValue("folderPath")]);
+    HRESULT hr = webview->setVirtualHost(utf8ToUtf16(hostname).c_str(), utf8ToUtf16(folderPath).c_str());
+    result->Success(flutter::EncodableValue(SUCCEEDED(hr)));
+
+  } else if (method_call.method_name().compare("ccb_removeVirtualHost") == 0) {
+    auto hostname = std::get<std::string>(arguments[flutter::EncodableValue("hostname")]);
+    HRESULT hr = webview->removeVirtualHost(utf8ToUtf16(hostname).c_str());
+    result->Success(flutter::EncodableValue(SUCCEEDED(hr)));
+
+  } else if (method_call.method_name().compare("ccb_addScript") == 0) {
+    std::shared_ptr<flutter::MethodResult<flutter::EncodableValue>> shared_result = std::move(result);
+    auto script = std::get<std::string>(arguments[flutter::EncodableValue("script")]);
+    webview->addScript(utf8ToUtf16(script).c_str(), [shared_result](std::wstring scriptId) {
+      std::string id = wideToUtf8(scriptId);
+      shared_result->Success(flutter::EncodableValue(id));
+    });
+
+  } else if (method_call.method_name().compare("ccb_removeScript") == 0) {
+    auto scriptId = std::get<std::string>(arguments[flutter::EncodableValue("scriptId")]);
+    HRESULT hr = webview->removeScript(utf8ToUtf16(scriptId).c_str());
+    result->Success(flutter::EncodableValue(SUCCEEDED(hr)));
+
+  } else if (method_call.method_name().compare("hideTab") == 0) {
+    // Guard: deactivate() can fire after dispose() — silently succeed.
+    if (webview != NULL) webview->hideTab();
+    result->Success();
+
+  } else if (method_call.method_name().compare("showTab") == 0) {
+    // Guard: activate() can fire before native create completes — silently succeed.
+    if (webview != NULL) webview->showTab();
+    result->Success();
+
   } else {
     result->NotImplemented();
   }

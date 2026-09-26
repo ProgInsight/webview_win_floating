@@ -80,4 +80,22 @@ public:
 	virtual void grantPermission(int deferralId, BOOL isGranted) = 0;
 
 	virtual void openDevTools() = 0;
+
+	// ── CCBrowser additions ───────────────────────────────────────────────────
+
+	// Virtual host mapping: maps https://<hostname> to a local folder path.
+	// folderPath should be an absolute Windows path (e.g. C:\Users\X\AppData\Local\ProgInsight\shared\web)
+	virtual HRESULT setVirtualHost(LPCWSTR hostname, LPCWSTR folderPath) = 0;
+	virtual HRESULT removeVirtualHost(LPCWSTR hostname) = 0;
+
+	// Extension script injection: injects JS before every page's own scripts.
+	// onComplete receives the scriptId to use for removal later.
+	virtual HRESULT addScript(LPCWSTR scriptCode, std::function<void(std::wstring)> onComplete) = 0;
+	virtual HRESULT removeScript(LPCWSTR scriptId) = 0;
+
+	// Tab visibility: hide/show without suspending the renderer.
+	// hideTab: put_IsVisible(false) + zero bounds -> page stays fully alive.
+	// showTab: restore bounds + put_IsVisible(true) -> back to normal.
+	virtual HRESULT hideTab() = 0;
+	virtual HRESULT showTab() = 0;
 };

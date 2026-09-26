@@ -1,0 +1,59 @@
+// =============================================================================
+// CCBrowser Bridge — Extension Script Injection Example
+// =============================================================================
+// Shows how to inject a script that runs before every page's own scripts.
+// This is the foundation for the Chrome extension translation layer.
+//
+// Flow:
+//   1. Dart downloads .crx from Chrome Web Store
+//   2. Dart unzips it and reads manifest.json
+//   3. Dart builds a wrapped JS string from the content scripts
+//   4. CCBrowserBridge.addScript() injects it — runs on every page load
+//   5. Store the returned scriptId to remove the extension later
+// =============================================================================
+
+import 'package:webview_win_floating/ccbrowser_bridge.dart';
+
+// Example: inject a simple userscript on every page
+Future<String?> exampleInjectUserScript(int webviewId) async {
+  final bridge = CCBrowserBridge(webviewId: webviewId);
+
+  // This script runs before the page's own JS — ideal for extensions
+  const script = '''
+(function() {
+  if (window.__ccbExt_example) return;
+  window.__ccbExt_example = true;
+
+  // Example: add a CCBrowser watermark div on every page
+  document.addEventListener('DOMContentLoaded', function() {
+    const el = document.createElement('div');
+    el.id = '__ccb_ext_badge';
+    el.style.cssText = [
+      'position:fixed',
+      'bottom:8px',
+      'right:8px',
+      'background:rgba(0,0,0,0.55)',
+      'color:#fff',
+      'font-size:11px',
+      'padding:3px 8px',
+      'border-radius:4px',
+      'z-index:99999',
+      'pointer-events:none',
+    ].join(';');
+    el.textContent = 'CCBrowser';
+    document.body.appendChild(el);
+  });
+})();
+''';
+
+  final scriptId = await bridge.addScript(script);
+  print('[CCBridge] Extension injected, scriptId=$scriptId');
+  return scriptId; // store this to remove later
+}
+
+// Remove an injected extension script by its ID
+Future<void> exampleRemoveScript(int webviewId, String scriptId) async {
+  final bridge = CCBrowserBridge(webviewId: webviewId);
+  await bridge.removeScript(scriptId);
+  print('[CCBridge] Extension removed, scriptId=$scriptId');
+}

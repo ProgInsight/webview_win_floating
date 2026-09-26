@@ -1,4 +1,5 @@
 #include "my_webview.h"
+#include "additions/bridge.h"
 
 #include <functional>
 #include <iostream>
@@ -86,6 +87,15 @@ public:
     void MyWebViewImpl::grantPermission(int deferralId, BOOL isGranted);
 
     void openDevTools() override;
+
+    // CCBrowser additions
+    HRESULT setVirtualHost(LPCWSTR hostname, LPCWSTR folderPath) override;
+    HRESULT removeVirtualHost(LPCWSTR hostname) override;
+    HRESULT addScript(LPCWSTR scriptCode, std::function<void(std::wstring)> onComplete) override;
+    HRESULT removeScript(LPCWSTR scriptId) override;
+
+    HRESULT hideTab() override;
+    HRESULT showTab() override;
 
 private:
     MyWebViewCreateParams m_params;
@@ -726,4 +736,48 @@ HRESULT MyWebViewImpl::resume()
 void MyWebViewImpl::openDevTools()
 {
     m_pWebview->OpenDevToolsWindow();
+}
+
+// =============================================================================
+// CCBrowser additions — implementations
+// =============================================================================
+
+HRESULT MyWebViewImpl::setVirtualHost(LPCWSTR hostname, LPCWSTR folderPath)
+{
+    return CCBridge_SetVirtualHost(m_pWebview, std::wstring(hostname), std::wstring(folderPath));
+}
+
+HRESULT MyWebViewImpl::removeVirtualHost(LPCWSTR hostname)
+{
+    return CCBridge_RemoveVirtualHost(m_pWebview, std::wstring(hostname));
+}
+
+HRESULT MyWebViewImpl::addScript(LPCWSTR scriptCode, std::function<void(std::wstring)> onComplete)
+{
+    return CCBridge_AddScript(m_pWebview, std::wstring(scriptCode), onComplete);
+}
+
+HRESULT MyWebViewImpl::removeScript(LPCWSTR scriptId)
+{
+    return CCBridge_RemoveScript(m_pWebview, std::wstring(scriptId));
+}
+
+HRESULT MyWebViewImpl::hideTab()
+{
+    // Hide the visual output without touching the renderer process.
+    // The page stays fully alive: JS runs, timers fire, audio/video play.
+    // Zero bounds removes hit-test area so Flutter receives mouse input.
+    RECT zero = {0, 0, 0, 0};
+    m_pController->put_IsVisible(FALSE);
+    m_pController->put_Bounds(zero);
+    return S_OK;
+}
+
+HRESULT MyWebViewImpl::showTab()
+{
+    // Restore bounds first so WebView2 has a valid paint rect,
+    // then make it visible again.
+    m_pController->put_Bounds(m_bounds);
+    m_pController->put_IsVisible(TRUE);
+    return S_OK;
 }
